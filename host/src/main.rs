@@ -55,7 +55,6 @@ struct BitcoinBlockInput {
 struct BitcoinBlockProof {
     pub block_hash: String,
     pub block_height: u64,
-    pub merkle_root: String,
     pub matching_transactions: Vec<MatchingTransaction>,
     pub total_transactions: u32,
     pub matching_count: u32,

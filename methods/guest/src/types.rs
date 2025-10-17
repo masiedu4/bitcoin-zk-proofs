@@ -8,12 +8,11 @@ pub struct BitcoinBlockInput {
     pub block_height: u64,
 }
 
-/// Output data from the ZK proof - filtered transactions with proofs
+/// Output data from the ZK proof - filtered transactions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitcoinBlockProof {
     pub block_hash: String,
     pub block_height: u64,
-    pub merkle_root: String,
     pub matching_transactions: Vec<MatchingTransaction>,
     pub total_transactions: u32,
     pub matching_count: u32,
@@ -24,23 +23,8 @@ pub struct BitcoinBlockProof {
 pub struct MatchingTransaction {
     pub txid: String,
     pub transaction_index: u32,
-    pub merkle_proof: MerkleProof,
     pub transaction_type: TransactionType,
     pub data: TransactionData,
-}
-
-/// Merkle proof for transaction inclusion
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MerkleProof {
-    pub path: Vec<MerkleProofNode>,
-    pub leaf_index: u32,
-}
-
-/// A node in the merkle proof path
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MerkleProofNode {
-    pub hash: String,
-    pub is_left: bool, // true if this node is the left child, false if right
 }
 
 /// Type of Core Lane transaction
