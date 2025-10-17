@@ -1,0 +1,17 @@
+[package]
+name = "bitcoin_proofs"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+risc0-zkvm = { version = "^3.0.3", default-features = false, features = ['std'] }
+# Bitcoin processing dependencies
+bitcoin = { version = "0.32", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+# Core Lane integration
+alloy-primitives = { version = "1.4.0", features = ["serde"] }
