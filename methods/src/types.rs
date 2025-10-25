@@ -65,6 +65,17 @@ pub struct MatchingTransaction {
     pub tx_type: TransactionType,
 }
 
+/// A Merkle proof path from a transaction to the root
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerkleProof {
+    /// The transaction ID being proven
+    pub txid: [u8; 32],
+    /// Path from leaf to root - each element is a sibling hash
+    pub path: Vec<[u8; 32]>,
+    /// Position indicators: true = right sibling, false = left sibling
+    pub positions: Vec<bool>,
+}
+
 /// Output data from the ZK proof
 ///
 /// The proof commits to:
@@ -89,7 +100,7 @@ pub struct BitcoinBlockProof {
     /// Matching transaction IDs (each committed in ZK proof)
     pub matching_transactions: Vec<MatchingTransaction>,
     /// Merkle proofs for pointed transactions (only for pointing strategy)
-    pub merkle_proofs: Vec<crate::merkle_simple::MerkleProof>,
+    pub merkle_proofs: Vec<MerkleProof>,
     /// Total number of transactions in the block
     pub total_transactions: u32,
     /// Number of matching transactions

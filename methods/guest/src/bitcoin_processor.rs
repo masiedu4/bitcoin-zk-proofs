@@ -1,9 +1,11 @@
+use bitcoin::hashes::Hash;
 use bitcoin::{Block, Transaction};
 use risc0_zkvm::guest::env;
 
+use crate::merkle_simple::{MerkleProof, MerkleTree};
 use crate::types::{
-    BitcoinBlockInput, BitcoinBlockProof, CoreLanePatterns, MatchingTransaction, TransactionData,
-    TransactionType,
+    BitcoinBlockInput, BitcoinBlockProof, CoreLanePatterns, MatchingTransaction, PointingProof,
+    ProofStrategy, SearchingProof, TransactionPattern, TransactionType,
 };
 
 /// Processes a Bitcoin block and extracts Core Lane relevant transactions
@@ -13,6 +15,7 @@ pub fn process_bitcoin_block(input: &BitcoinBlockInput) -> Result<BitcoinBlockPr
         "Input block size: {} bytes",
         input.raw_block.len()
     ));
+
     // Parse the raw block
     env::log("Parsing raw block...");
     let block: Block = bitcoin::consensus::deserialize(&input.raw_block)
@@ -22,18 +25,48 @@ pub fn process_bitcoin_block(input: &BitcoinBlockInput) -> Result<BitcoinBlockPr
         block.txdata.len()
     ));
 
-    // Compute block hash
+    // Compute block hash (this commits to the entire block including merkle root)
     env::log("Computing block hash...");
     let block_hash = block.block_hash().to_string();
     env::log(&format!("Block hash computed: {}", block_hash));
 
-    // Filter transactions for Core Lane patterns (no merkle tree needed!)
-    env::log("Filtering transactions for Core Lane patterns...");
+    // Process based on strategy
+    match &input.strategy {
+        ProofStrategy::Searching(searching_proof) => {
+            process_searching_strategy(&block, searching_proof, &block_hash, input.block_height)
+        }
+        ProofStrategy::Pointing(pointing_proof) => {
+            process_pointing_strategy(&block, pointing_proof, &block_hash, input.block_height)
+        }
+    }
+}
+
+/// Process using searching strategy - find transactions by pattern
+fn process_searching_strategy(
+    block: &Block,
+    searching_proof: &SearchingProof,
+    block_hash: &str,
+    block_height: u64,
+) -> Result<BitcoinBlockProof, String> {
+    env::log("Using searching strategy...");
+
     let patterns = CoreLanePatterns::default();
     let mut matching_transactions = Vec::new();
 
     for (index, tx) in block.txdata.iter().enumerate() {
-        if let Some(matching_tx) = analyze_transaction_simple(tx, index as u32, &patterns)? {
+        if let Some((tx_type, txid)) =
+            check_transaction_patterns(tx, index as u32, &patterns, &searching_proof.pattern)?
+        {
+            env::log(&format!(
+                "Found matching transaction: {} (type: {:?})",
+                txid, tx_type
+            ));
+
+            let matching_tx = MatchingTransaction {
+                txid: txid.clone(),
+                tx_type,
+            };
+
             matching_transactions.push(matching_tx);
         }
     }
@@ -46,106 +79,170 @@ pub fn process_bitcoin_block(input: &BitcoinBlockInput) -> Result<BitcoinBlockPr
     ));
 
     Ok(BitcoinBlockProof {
-        block_hash,
-        block_height: input.block_height,
+        block_hash: block_hash.to_string(),
+        block_height,
+        strategy: ProofStrategy::Searching(searching_proof.clone()),
         matching_transactions,
+        merkle_proofs: Vec::new(), // No Merkle proofs for searching
         total_transactions: block.txdata.len() as u32,
         matching_count,
     })
 }
 
-/// Analyzes a transaction to see if it matches Core Lane patterns (simplified without merkle proofs)
-fn analyze_transaction_simple(
+/// Process using pointing strategy - prove specific transaction exists
+fn process_pointing_strategy(
+    block: &Block,
+    pointing_proof: &PointingProof,
+    block_hash: &str,
+    block_height: u64,
+) -> Result<BitcoinBlockProof, String> {
+    env::log("Using pointing strategy...");
+    env::log(&format!(
+        "Looking for transaction {} at position {}",
+        pointing_proof.txid, pointing_proof.tx_position
+    ));
+
+    // Find the transaction by ID (ignore the provided position for now)
+    let mut found_position = None;
+    for (index, tx) in block.txdata.iter().enumerate() {
+        let actual_txid = tx.compute_txid().to_string();
+        if actual_txid == pointing_proof.txid {
+            found_position = Some(index);
+            break;
+        }
+    }
+
+    let tx_position = found_position
+        .ok_or_else(|| format!("Transaction {} not found in block", pointing_proof.txid))?
+        as u32;
+
+    let tx = &block.txdata[tx_position as usize];
+    env::log(&format!("Found transaction at position {}", tx_position));
+
+    // Verify the transaction matches the expected type
+    let patterns = CoreLanePatterns::default();
+    let (actual_type, _) = check_transaction_patterns(
+        tx,
+        pointing_proof.tx_position,
+        &patterns,
+        &TransactionPattern::All,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "Transaction {} does not match any Core Lane pattern",
+            pointing_proof.txid
+        )
+    })?;
+
+    if actual_type != pointing_proof.expected_type {
+        return Err(format!(
+            "Transaction type mismatch: expected {:?}, got {:?}",
+            pointing_proof.expected_type, actual_type
+        ));
+    }
+
+    // Build Merkle tree and generate proof
+    env::log("Building Merkle tree...");
+    let txids: Vec<[u8; 32]> = block
+        .txdata
+        .iter()
+        .map(|tx| tx.compute_txid().to_byte_array())
+        .collect();
+
+    let merkle_tree = MerkleTree::build_merkle_tree(&txids)?;
+    let merkle_proof = merkle_tree.generate_proof(tx_position)?;
+
+    // Verify the proof
+    if !merkle_proof.verify_proof(&merkle_tree.merkle_root)? {
+        return Err("Generated Merkle proof failed verification".to_string());
+    }
+
+    env::log("Merkle proof generated and verified successfully");
+
+    let matching_tx = MatchingTransaction {
+        txid: pointing_proof.txid.clone(),
+        tx_type: actual_type,
+    };
+
+    Ok(BitcoinBlockProof {
+        block_hash: block_hash.to_string(),
+        block_height,
+        strategy: ProofStrategy::Pointing(pointing_proof.clone()),
+        matching_transactions: vec![matching_tx],
+        merkle_proofs: vec![merkle_proof],
+        total_transactions: block.txdata.len() as u32,
+        matching_count: 1,
+    })
+}
+
+/// Checks if a transaction matches Core Lane patterns and returns the type and txid if it does
+fn check_transaction_patterns(
     tx: &Transaction,
-    index: u32,
+    _index: u32,
     patterns: &CoreLanePatterns,
-) -> Result<Option<MatchingTransaction>, String> {
+    search_pattern: &TransactionPattern,
+) -> Result<Option<(TransactionType, String)>, String> {
     let txid = tx.compute_txid().to_string();
 
     // Check for burn transactions (OP_RETURN with BRN1 prefix)
-    if let Some(burn_data) = extract_burn_transaction(tx, patterns) {
-        return Ok(Some(MatchingTransaction {
-            txid,
-            transaction_index: index,
-            transaction_type: TransactionType::Burn,
-            data: burn_data,
-        }));
+    if extract_burn_transaction(tx, patterns) {
+        if matches!(
+            search_pattern,
+            TransactionPattern::Burns | TransactionPattern::All
+        ) {
+            return Ok(Some((TransactionType::Burn, txid)));
+        }
     }
 
     // Check for Core Lane DA transactions
-    if let Some(da_data) = extract_da_transaction(tx, patterns) {
-        return Ok(Some(MatchingTransaction {
-            txid,
-            transaction_index: index,
-            transaction_type: TransactionType::DAPosting,
-            data: da_data,
-        }));
+    if extract_da_transaction(tx, patterns) {
+        if matches!(
+            search_pattern,
+            TransactionPattern::DataAvailability | TransactionPattern::All
+        ) {
+            return Ok(Some((TransactionType::DataAvailability, txid)));
+        }
     }
 
-    // Check for fill transactions (placeholder - implement based on Core Lane spec)
-    if let Some(fill_data) = extract_fill_transaction(tx) {
-        return Ok(Some(MatchingTransaction {
-            txid,
-            transaction_index: index,
-            transaction_type: TransactionType::Fill,
-            data: fill_data,
-        }));
+    // Check for fill transactions
+    if extract_fill_transaction(tx, patterns) {
+        if matches!(
+            search_pattern,
+            TransactionPattern::Fills | TransactionPattern::All
+        ) {
+            return Ok(Some((TransactionType::Fill, txid)));
+        }
     }
 
     Ok(None)
 }
 
-/// Extracts burn transaction data from OP_RETURN outputs
-fn extract_burn_transaction(
-    tx: &Transaction,
-    patterns: &CoreLanePatterns,
-) -> Option<TransactionData> {
+/// Checks if transaction is a burn transaction (OP_RETURN with BRN1 prefix)
+fn extract_burn_transaction(tx: &Transaction, patterns: &CoreLanePatterns) -> bool {
     for output in &tx.output {
         if output.script_pubkey.is_op_return() {
             if let Some(payload) = extract_op_return_data(&output.script_pubkey) {
                 if payload.len() >= 28 && payload.starts_with(&patterns.burn_prefix) {
-                    // Parse BRN1 format: BRN1 + chain_id(4) + eth_address(20)
-                    let chain_id =
-                        u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    let eth_address_bytes = &payload[8..28];
-                    let eth_address = alloy_primitives::Address::from_slice(eth_address_bytes);
-
-                    // Calculate burn amount from input value
-                    let burn_amount = calculate_burn_amount(tx);
-
-                    return Some(TransactionData::Burn {
-                        amount: burn_amount,
-                        chain_id,
-                        eth_address,
-                    });
+                    return true;
                 }
             }
         }
     }
-    None
+    false
 }
 
-/// Extracts Core Lane DA transaction data
-fn extract_da_transaction(
-    tx: &Transaction,
-    patterns: &CoreLanePatterns,
-) -> Option<TransactionData> {
+/// Checks if transaction is a Core Lane DA transaction
+fn extract_da_transaction(tx: &Transaction, patterns: &CoreLanePatterns) -> bool {
     for output in &tx.output {
         if output.script_pubkey.is_op_return() {
             if let Some(payload) = extract_op_return_data(&output.script_pubkey) {
                 if payload.starts_with(&patterns.da_prefix) {
-                    return Some(TransactionData::DAPosting { raw_data: payload });
+                    return true;
                 }
             }
         }
     }
-    None
-}
-
-/// Extracts fill transaction data (placeholder implementation)
-fn extract_fill_transaction(_tx: &Transaction) -> Option<TransactionData> {
-    // TODO: Implement based on Core Lane fill transaction specification
-    None
+    false
 }
 
 /// Extracts data from OP_RETURN script
@@ -157,6 +254,28 @@ fn extract_op_return_data(script: &bitcoin::Script) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Checks if transaction is a fill transaction (intent fulfillment)
+fn extract_fill_transaction(tx: &Transaction, _patterns: &CoreLanePatterns) -> bool {
+    // Fill transactions are identified by:
+    // 1. They send Bitcoin to a specific address (from intent)
+    // 2. They have a specific amount (from intent)
+    // 3. They may have OP_RETURN data indicating it's a fill
+
+    // For now, we'll identify fills by looking for OP_RETURN with "FILL" prefix
+    // In practice, fills would be identified by the filler bot pointing to them
+    for output in &tx.output {
+        if output.script_pubkey.is_op_return() {
+            if let Some(payload) = extract_op_return_data(&output.script_pubkey) {
+                if payload.len() >= 4 && payload.starts_with(b"FILL") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Calculates the burn amount from transaction inputs

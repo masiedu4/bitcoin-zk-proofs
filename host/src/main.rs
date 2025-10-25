@@ -25,6 +25,9 @@ enum Commands {
         /// Output file for the proof
         #[arg(short, long, default_value = "proof.json")]
         output: String,
+        /// Strategy: "searching" or "pointing:txid:position:type"
+        #[arg(long, default_value = "searching")]
+        strategy: String,
     },
     /// Verify a ZK proof
     Verify {
@@ -48,17 +51,14 @@ enum Commands {
 struct BitcoinBlockInput {
     pub raw_block: Vec<u8>,
     pub block_height: u64,
+    pub strategy: ProofStrategy,
 }
 
-/// Output data from the ZK proof
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BitcoinBlockProof {
-    pub block_hash: String,
-    pub block_height: u64,
-    pub matching_transactions: Vec<MatchingTransaction>,
-    pub total_transactions: u32,
-    pub matching_count: u32,
-}
+/// Output data from the ZK proof (re-exported from methods)
+use methods::types::{
+    BitcoinBlockProof, PointingProof, ProofStrategy, SearchingProof, TransactionPattern,
+    TransactionType,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MatchingTransaction {
@@ -76,8 +76,12 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Prove { height, output } => {
-            generate_proof(height, &output)?;
+        Commands::Prove {
+            height,
+            output,
+            strategy,
+        } => {
+            generate_proof(height, &output, &strategy)?;
         }
         Commands::Verify { proof_file } => {
             verify_proof(&proof_file)?;
@@ -94,17 +98,22 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Generates a ZK proof for a specific Bitcoin block
-fn generate_proof(block_height: u64, output_file: &str) -> anyhow::Result<()> {
+fn generate_proof(block_height: u64, output_file: &str, strategy_str: &str) -> anyhow::Result<()> {
     println!("🔍 Fetching Bitcoin block at height {}", block_height);
 
     // Fetch the block from Blockstream API
     let raw_block = fetch_bitcoin_block(block_height)?;
     println!("✅ Fetched block ({} bytes)", raw_block.len());
 
+    // Parse strategy
+    let strategy = parse_strategy(strategy_str)?;
+    println!("Using strategy: {:?}", strategy);
+
     // Create input for the ZK proof
     let input = BitcoinBlockInput {
         raw_block,
         block_height,
+        strategy,
     };
 
     println!("🔐 Generating ZK proof...");
@@ -116,7 +125,8 @@ fn generate_proof(block_height: u64, output_file: &str) -> anyhow::Result<()> {
         .build()
         .unwrap();
 
-    // Generate the proof
+    // Generate the proof using Groth16 (remote proving via Bonsai)
+    // Bonsai will automatically use Groth16 when BONSAI_API_KEY is set
     let prover = default_prover();
     let prove_info = prover.prove(env, BITCOIN_PROOFS_ELF)?;
     let receipt = prove_info.receipt;
@@ -171,6 +181,7 @@ fn run_daemon(start_height: u64, output_dir: &str) -> anyhow::Result<()> {
         match generate_proof(
             current_height,
             &format!("{}/block_{}.json", output_dir, current_height),
+            "searching",
         ) {
             Ok(_) => {
                 println!("✅ Processed block {}", current_height);
@@ -198,4 +209,41 @@ fn fetch_bitcoin_block(height: u64) -> anyhow::Result<Vec<u8>> {
     let block_data = response.bytes()?;
 
     Ok(block_data.to_vec())
+}
+
+/// Parse strategy string into ProofStrategy enum
+fn parse_strategy(strategy_str: &str) -> anyhow::Result<ProofStrategy> {
+    if strategy_str == "searching" {
+        Ok(ProofStrategy::Searching(SearchingProof {
+            pattern: TransactionPattern::All,
+        }))
+    } else if strategy_str.starts_with("pointing:") {
+        let parts: Vec<&str> = strategy_str.split(':').collect();
+        if parts.len() != 4 {
+            return Err(anyhow::anyhow!(
+                "Invalid pointing strategy format. Expected: pointing:txid:position:type"
+            ));
+        }
+
+        let txid = parts[1].to_string();
+        let position = parts[2]
+            .parse::<u32>()
+            .map_err(|e| anyhow::anyhow!("Invalid position: {}", e))?;
+        let tx_type = match parts[3] {
+            "burn" => TransactionType::Burn,
+            "da" => TransactionType::DataAvailability,
+            "fill" => TransactionType::Fill,
+            _ => return Err(anyhow::anyhow!("Invalid transaction type: {}", parts[3])),
+        };
+
+        Ok(ProofStrategy::Pointing(PointingProof {
+            txid,
+            tx_position: position,
+            expected_type: tx_type,
+        }))
+    } else {
+        Err(anyhow::anyhow!(
+            "Invalid strategy. Use 'searching' or 'pointing:txid:position:type'"
+        ))
+    }
 }

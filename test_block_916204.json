@@ -1,0 +1,18 @@
+{
+  "block_hash": "0000000000000000000168247b86044f811a57dee8c6a16d0a7b8c8e46bb0d00",
+  "block_height": 916204,
+  "strategy": {
+    "Searching": {
+      "pattern": "All"
+    }
+  },
+  "matching_transactions": [
+    {
+      "txid": "8e8a938903e78c73e3f0bd6ee2fae0f4095ab00ebed92bbfbe448fd6c2dfa89a",
+      "tx_type": "DataAvailability"
+    }
+  ],
+  "merkle_proofs": [],
+  "total_transactions": 2019,
+  "matching_count": 1
+}

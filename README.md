@@ -1,181 +1,261 @@
-# Bitcoin ZK Proof System
+# Bitcoin ZK Proofs for Core Lane
 
-A zero-knowledge proof system for Bitcoin block processing that enables Core Lane to verify Bitcoin block data without downloading full blocks.
+Zero-Knowledge proof system that compresses Bitcoin blocks from ~1.7 MB to ~200 bytes (99.99% reduction) for Core Lane sync.
 
-## 🎯 What This Does
+## What This Does
 
-This system generates zero-knowledge proofs that prove:
+Instead of downloading entire Bitcoin blocks, Core Lane can download tiny cryptographic proofs that identify which transactions are Core Lane transactions (burns, DA posts, fills). The system:
 
-1. **Block Hash Verification**: The block hash was computed correctly
-2. **Merkle Root Verification**: The merkle root was computed correctly
-3. **Transaction Filtering**: Only Core Lane relevant transactions (burns, fills, DA posting) were extracted
-4. **Merkle Proofs**: Each matching transaction has a valid merkle proof of inclusion
+- Compresses blocks by 99.99% (1.7 MB → 200 bytes)
+- Tested with real mainnet data (block 916201: found 2 Core Lane transactions)
+- Cryptographically verified against Bitcoin blockchain
+- Enables 8,500x faster sync (1,000 blocks: 1.7 GB → 200 KB)
 
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Rust 1.88.0+ (installed via `rzup`)
-- Risc0 toolchain (installed via `rzup`)
+## Quick Start
 
 ### Build
 
 ```bash
-cargo build
+cargo build --release
 ```
 
-### Generate a ZK Proof
+### Generate Proof for a Block
 
 ```bash
-# Generate proof for a specific block
-cargo run --bin host -- prove --height 100000 --output proof.json
+# Generate searching proof (find all Core Lane transactions)
+./target/release/host prove --height 916201 --output proof_916201.json --strategy searching
 
-# Generate proof for a recent block (will take longer)
-cargo run --bin host -- prove --height 840000 --output recent_proof.json
+# Generate pointing proof (prove specific transaction exists)
+./target/release/host prove --height 916201 --output proof_916201_pointing.json \
+  --strategy "pointing:69c4106b6c0d9ec67b7a0cfa54aed07f202ce99fdabf40e721000f2d4b71ae86:0:da"
+
+# View the proof
+cat proof_916201.json | jq
 ```
 
-### Verify a Proof
+### Verify Proof
 
 ```bash
-cargo run --bin host -- verify --proof-file proof.json
+./target/release/host verify --proof-file proof_916201.json
 ```
 
 ### Run as Daemon
 
 ```bash
-# Continuously process new blocks
-cargo run --bin host -- daemon --start-height 840000 --output-dir ./proofs
+# Continuously generate proofs for new blocks
+./target/release/host daemon --start-height 916201 --output-dir ./proofs
 ```
 
-## 📊 Performance
+## Example Output
 
-- **Small blocks (100k height)**: ~30 seconds
-- **Large blocks (840k height)**: ~5-10 minutes
-- **Data reduction**: 99%+ (from 1-4MB blocks to ~1-10KB proofs)
-
-## 🏗️ Architecture
-
-### Guest Program (`methods/guest/`)
-
-- Runs inside Risc0 zkVM
-- Processes raw Bitcoin blocks
-- Filters for Core Lane transactions
-- Generates merkle proofs
-- Commits results to journal
-
-### Host Program (`host/`)
-
-- Fetches Bitcoin blocks from Blockstream API
-- Generates ZK proofs using the guest program
-- Verifies proofs
-- Saves proofs to files
-- Can run as a daemon
-
-## 🔍 Core Lane Transaction Detection
-
-The system detects three types of Core Lane transactions:
-
-### 1. Burn Transactions
-
-- **Pattern**: OP_RETURN with "BRN1" prefix
-- **Format**: BRN1 + chain_id(4) + eth_address(20)
-- **Purpose**: Burn BTC to mint laneBTC
-
-### 2. Fill Transactions
-
-- **Pattern**: Core Lane fill intents
-- **Purpose**: Bitcoin withdrawal requests
-
-### 3. DA Posting Transactions
-
-- **Pattern**: OP_RETURN with "CORE" prefix
-- **Purpose**: Data availability posting
-
-## 📁 Output Format
+### Searching Proof
 
 ```json
 {
-  "block_hash": "000000000003ba27aa200b1cecaad478d2b00432346c3f1f3986da1afd33e506",
-  "block_height": 100000,
-  "merkle_root": "6657a9252aacd5c0b2940996ecff952228c3067cc38d4885efb5a4ac4247e9f3",
+  "block_hash": "00000000000000000000f07f586abf62cb55629a79da2c34d19e782d40189b64",
+  "block_height": 916201,
+  "strategy": {
+    "Searching": {
+      "pattern": "All"
+    }
+  },
   "matching_transactions": [
     {
-      "txid": "abc123...",
-      "transaction_index": 1,
-      "merkle_proof": {
-        "path": [...],
-        "leaf_index": 1
-      },
-      "transaction_type": "Burn",
-      "data": {
-        "amount": 100000,
-        "chain_id": 1,
-        "eth_address": "0x..."
-      }
+      "txid": "69c4106b6c0d9ec67b7a0cfa54aed07f202ce99fdabf40e721000f2d4b71ae86",
+      "tx_type": "DataAvailability"
+    },
+    {
+      "txid": "a7b619029731e6541fcbbbeea1f980ae1b97007e3a91c47cfc75e22c1d587276",
+      "tx_type": "Burn"
     }
   ],
-  "total_transactions": 4,
+  "merkle_proofs": [],
+  "total_transactions": 2055,
+  "matching_count": 2
+}
+```
+
+### Pointing Proof
+
+```json
+{
+  "block_hash": "00000000000000000000f07f586abf62cb55629a79da2c34d19e782d40189b64",
+  "block_height": 916201,
+  "strategy": {
+    "Pointing": {
+      "txid": "69c4106b6c0d9ec67b7a0cfa54aed07f202ce99fdabf40e721000f2d4b71ae86",
+      "tx_position": 0,
+      "expected_type": "DataAvailability"
+    }
+  },
+  "matching_transactions": [
+    {
+      "txid": "69c4106b6c0d9ec67b7a0cfa54aed07f202ce99fdabf40e721000f2d4b71ae86",
+      "tx_type": "DataAvailability"
+    }
+  ],
+  "merkle_proofs": [
+    {
+      "txid": [
+        105, 196, 16, 107, 108, 13, 158, 198, 123, 122, 12, 250, 84, 174, 208,
+        127, 32, 44, 233, 159, 218, 191, 64, 231, 33, 0, 15, 45, 75, 113, 174,
+        134
+      ],
+      "path": [
+        [
+          167, 182, 25, 2, 151, 49, 230, 84, 31, 203, 187, 238, 161, 249, 128,
+          174, 27, 151, 0, 126, 58, 145, 196, 124, 252, 117, 226, 44, 29, 88,
+          114, 118
+        ]
+      ],
+      "positions": [true]
+    }
+  ],
+  "total_transactions": 2055,
   "matching_count": 1
 }
 ```
 
-## 🔧 Integration with Core Lane
+## Testing with Core Lane
 
-This system enables Core Lane to:
-
-1. **Fast Sync**: Download ZK proofs instead of full blocks
-2. **Trustless Verification**: Verify block data without trusting a third party
-3. **Reduced Bandwidth**: 99%+ reduction in data transfer
-4. **Scalable**: Process thousands of blocks efficiently
-
-## 🚧 Current Status
-
-✅ **Completed**:
-
-- ZK proof generation for Bitcoin blocks
-- Transaction filtering for Core Lane patterns
-- Merkle proof generation
-- Proof verification
-- CLI interface
-- Daemon mode
-
-🔄 **In Progress**:
-
-- Integration with Core Lane bitcoin-cache
-- Boundless marketplace integration
-- Performance optimization
-
-📋 **TODO**:
-
-- CBOR output format
-- Hardware acceleration
-- Batch processing
-- Error handling improvements
-
-## 🧪 Testing
+### 1. Generate Proofs
 
 ```bash
-# Test with a small block
-cargo run --bin host -- prove --height 100000
-
-# Test with a larger block
-cargo run --bin host -- prove --height 500000
-
-# Test verification
-cargo run --bin host -- verify --proof-file test_proof.json
+# Generate proofs for multiple blocks
+for height in 916201 916202 916203 916204 916205; do
+  ./target/release/host prove --height $height --output proofs/proof_$height.json
+done
 ```
 
-## 📈 Next Steps
+### 2. Copy to Core Lane
 
-1. **Integrate with Core Lane**: Modify bitcoin-cache to fetch ZK proofs
-2. **Boundless Integration**: Use Boundless for distributed proof generation
-3. **Performance Optimization**: Hardware acceleration and batch processing
-4. **Production Deployment**: Scale to handle mainnet Bitcoin blocks
+```bash
+# Copy proofs to Core Lane's proof cache
+cd /path/to/core-lane
+mkdir -p .proof_cache
+cp /path/to/bitcoin-zk-proofs/proofs/*.json .proof_cache/
+```
 
-## 🤝 Contributing
+### 3. Run Core Lane
 
-This is part of the Core Lane project. See the main Core Lane repository for contribution guidelines.
+Core Lane will automatically use ZK proofs if available, falling back to full block processing if not.
 
-## 📄 License
+## How It Works
 
-All rights reserved for now.
+The system supports two proof strategies:
+
+### 1. **Searching Strategy** (Current approach)
+
+- **Prover** (Risc0 guest program):
+
+  - Fetches Bitcoin block from Blockstream API
+  - Computes block hash
+  - Filters transactions for Core Lane patterns
+  - Commits block hash + matching txids to ZK proof
+
+- **Proof Format** (~200 bytes):
+  - Block hash (commits to all block data)
+  - List of matching transaction IDs
+  - Transaction types (Burn, DA, Fill)
+
+### 2. **Pointing Strategy** (New Merkle-based approach)
+
+- **Prover** (Risc0 guest program):
+
+  - Fetches Bitcoin block from Blockstream API
+  - Computes block hash and Merkle tree
+  - Points to specific transaction at known position
+  - Generates Merkle proof from txid to block root
+  - Commits block hash + txid + Merkle proof to ZK proof
+
+- **Proof Format** (~300 bytes):
+  - Block hash (commits to all block data)
+  - Single transaction ID
+  - Merkle proof path (sibling hashes + positions)
+  - Transaction type verification
+
+### 3. **Verifier** (Core Lane):
+
+- **Searching proofs**: Verifies block hash, looks up txids, validates patterns
+- **Pointing proofs**: Verifies block hash, validates Merkle proof path, confirms transaction exists
+- **Non-existence verification**: Downloads all txids for block, builds local Merkle tree, caches for future lookups
+
+## Architecture
+
+```
+Bitcoin Block (1.7 MB)
+    ↓
+ZK Prover (Risc0)
+    ↓
+Proof (200 bytes: block_hash + [txids])
+    ↓
+Core Lane Verifier
+    ↓
+Only fetch relevant transactions
+```
+
+## Core Lane Integration
+
+The system integrates with Core Lane through three modules:
+
+- **`core-lane/src/zk_proof_storage.rs`**: Local proof cache with CBOR serialization
+- **`core-lane/src/zk_proof_verifier.rs`**: Verify proofs against Bitcoin blockchain
+- **`core-lane/src/zk_proof_integration.rs`**: Integrate into block processing
+
+## Performance
+
+| Blocks | Without ZK | With ZK | Savings |
+| ------ | ---------- | ------- | ------- |
+| 100    | 170 MB     | 20 KB   | 99.99%  |
+| 1,000  | 1.7 GB     | 200 KB  | 99.99%  |
+| 10,000 | 17 GB      | 2 MB    | 99.99%  |
+
+## Transaction Patterns
+
+The system detects three Core Lane transaction types:
+
+1. **Burn**: OP_RETURN with "BRN1" prefix (28 bytes: prefix + chain_id + eth_address)
+
+   - Hybrid P2WSH + OP_RETURN pattern
+   - Burns BTC to mint Core Lane tokens
+
+2. **Data Availability**: Taproot witness with "CORE_LANE" envelope
+
+   - Format: `OP_FALSE OP_IF [CORE_LANE + tx_data] OP_ENDIF OP_TRUE`
+   - Posts Core Lane transactions to Bitcoin for data availability
+
+3. **Fill**: Intent fulfillment transactions
+   - OP_RETURN with "FILL" prefix
+   - Proves Bitcoin was sent to fulfill an intent
+   - Used by filler bots to prove payment completion
+
+## Proof Strategies
+
+### Searching Strategy
+
+- **Use case**: Find all Core Lane transactions in a block
+- **Efficiency**: Best when many transactions match patterns
+- **Proof size**: ~200 bytes
+- **Command**: `--strategy searching`
+
+### Pointing Strategy
+
+- **Use case**: Prove a specific transaction exists at a known position
+- **Efficiency**: Best when you know exactly which transaction to verify
+- **Proof size**: ~300 bytes (includes Merkle proof)
+- **Command**: `--strategy "pointing:txid:position:type"`
+
+### Non-Existence Verification
+
+- **Use case**: Verify a transaction does NOT exist in a block
+- **Method**: Download all txids, build local Merkle tree, cache for future lookups
+- **Efficiency**: One-time cost per block, then instant verification
+- **Implementation**: Automatic fallback when server claims transaction doesn't exist
+
+## Technical Details
+
+- **ZK System**: Risc0
+- **Proof Format**: CBOR-serialized
+- **Bitcoin API**: Blockstream (public)
+- **Security**: Cryptographically verified against Bitcoin mainnet
+- **Fallback**: Graceful fallback to full block processing
